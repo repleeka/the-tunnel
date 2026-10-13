@@ -1,6 +1,6 @@
 [package]
 name = "the-tunnel"
-version = "0.5.0"
+version = "0.5.1"
 description = "Move files between your devices over the local network"
 authors = ["The Tunnel"]
 edition = "2024"

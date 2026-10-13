@@ -19,6 +19,9 @@ export type Settings = {
   askBeforeReceiving: boolean;
   syncEnabled: boolean;
   browseScope: BrowseScope;
+  launchAtLogin: boolean;
+  contextMenu: boolean;
+  notifications: boolean;
 };
 
 export type BrowseScope = "computer" | "home" | "syncFolder" | "nobody";
@@ -32,7 +35,7 @@ export type Device = {
   online: boolean;
 };
 
-export type TransferStatus = "waiting" | "active" | "done" | "declined" | "failed";
+export type TransferStatus = "waiting" | "active" | "done" | "declined" | "failed" | "cancelled";
 
 export type Transfer = {
   id: string;
@@ -47,6 +50,7 @@ export type Transfer = {
   error: string | null;
   location: string | null;
   startedAt: number;
+  canRetry: boolean;
 };
 
 export type PeerSync = {
@@ -106,6 +110,9 @@ export const api = {
   clearTransfers: () => invoke<void>("clear_transfers"),
   resolveDeletions: (deviceId: string, paths: string[], del: boolean) => invoke<void>("resolve_deletions", { deviceId, paths, delete: del }),
   syncNow: () => invoke<void>("sync_now"),
+  cancelTransfer: (transferId: string) => invoke<void>("cancel_transfer", { transferId }),
+  retryTransfer: (transferId: string) => invoke<void>("retry_transfer", { transferId }),
+  takeSendRequest: () => invoke<string[]>("take_send_request"),
 };
 
 export const onTunnelEvent = (cb: (e: TunnelEvent) => void): Promise<UnlistenFn> =>

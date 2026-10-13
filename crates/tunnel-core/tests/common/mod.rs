@@ -20,6 +20,7 @@ pub async fn engine(root: &Path, name: &str) -> Engine {
         ask_before_receiving: Some(false),
         sync_enabled: Some(true),
         browse_scope: Some(BrowseScope::SyncFolder),
+        ..Default::default()
     })
     .unwrap();
     e

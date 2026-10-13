@@ -13,7 +13,7 @@ use anyhow::{Context, Result, bail};
 use crate::protocol::Item;
 
 /// System clutter that should never be transferred.
-const IGNORED: &[&str] = &[".DS_Store", "Thumbs.db", "desktop.ini", ".localized", crate::sync::index::META_DIR];
+const IGNORED: &[&str] = &[".DS_Store", "Thumbs.db", "desktop.ini", ".localized", crate::sync::index::META_DIR, crate::transfer::PARTIAL_DIR];
 
 pub const PARTIAL_SUFFIX: &str = ".tunnelpart";
 
@@ -220,7 +220,7 @@ pub fn plan_destinations(dest_root: &Path, items: &[Item]) -> Result<Vec<PathBuf
     Ok(out)
 }
 
-fn free_name(dir: &Path, name: &str) -> String {
+pub fn free_name(dir: &Path, name: &str) -> String {
     let taken = |n: &str| dir.join(n).exists() || dir.join(format!("{n}{PARTIAL_SUFFIX}")).exists();
     if !taken(name) {
         return name.to_string();

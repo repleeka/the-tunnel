@@ -5,14 +5,14 @@ Files go directly from one device to the other, encrypted, and never touch the i
 
 ## Status
 
-**Version 0.2:** phases 1 and 2 are done: discovery, pairing, send and pull, and automatic folder sync.
+**Version 0.5:** phases 1, 2 and 4 are done. Phase 3 (version history) was skipped, and phase 5 (mobile) is planned.
 
 | Phase | Scope |
 | --- | --- |
 | 1 | Find devices, pair with a 6-digit code, send and pull files and folders ✅ |
 | 2 | Auto-sync of The Tunnel folder: change detection, rename handling, delete review, conflict copies, resumable downloads ✅ |
-| 3 | Version history with restore |
-| 4 | "Send to my Mac/PC" in the right-click menu, start at login, signed installers |
+| 3 | Version history with restore (skipped for now) |
+| 4 | Menu bar / tray, open at login, notifications, "Send with The Tunnel" in the right-click menu, cancel and resumable retry, firewall rule in the Windows installer, Mac `.dmg` ✅ (code signing still to do) |
 | 5 | iOS and Android |
 
 ## How it works
@@ -24,7 +24,8 @@ Files go directly from one device to the other, encrypted, and never touch the i
 - **Local only.** Inbound and outbound connections are refused unless the address is private (10/8, 172.16/12, 192.168/16), link-local or loopback. The UI loads no remote resources, and the app has no telemetry or update checks.
 - **Safe writes.** Incoming paths are sanitized, so `..`, absolute paths and Windows-reserved names are rejected or rewritten. Each file is written to a `.tunnelpart` file, checked against the sender's SHA-256 hash, and only then renamed into place. Existing files are never overwritten: a second `Photos` arrives as `Photos (1)`.
 - **Sync.** Each device watches The Tunnel folder and keeps an index of it. Each file in the index has a content hash and a version vector, which records how many times each device has changed it. In each round a device fetches the other device's index and pulls whatever is newer there. Deletions are never applied automatically: the other device asks you to *Delete* (the file goes to the Trash or Recycle Bin) or *Keep* (the file is restored on the deleting device). A delete plus an add with the same contents is applied as a rename. If both devices edit the same file, the later edit keeps the name and the other is saved as `name (conflict from <device> <time>).ext`. Downloads go to `.thetunnel/tmp` inside the folder, resume after an interruption, and are moved into place only after their hash checks out and the local file hasn't changed in the meantime. Names Windows can't store are skipped and reported.
-- **Pulling.** A paired device can browse and copy files only from your **shared folder** (default `~/The Tunnel`). Symlinks are not followed.
+- **Browsing and copying.** By default a paired device can browse the whole computer (home folder plus every drive), read-only. Hidden and system items (dot-files, Library, AppData) and The Tunnel's own data are never listed or served, and symlinks are not followed. Settings → Browsing can narrow this to the home folder or the sync folder, or turn browsing off.
+- **Resumable transfers.** A failed or cancelled send keeps its partly received files in a hidden `.tunnel-partial` folder on the receiver. *Retry* resumes each file from where it stopped, and the whole file is still checked against its hash.
 
 ## Project layout
 
@@ -57,8 +58,15 @@ TUNNEL_DATA_DIR=/tmp/tunnel-b TUNNEL_PORT=47821 target/debug/the-tunnel &
 
 The GitHub Actions workflow in `.github/workflows/build.yml` runs the engine tests and builds the Windows (`.msi`, `.exe`) and macOS (`.dmg`) installers on every push.
 
+## Desktop integration
+
+- **Menu bar / tray.** Closing the window keeps The Tunnel running. The icon shows status and offers Open, Sync Now, Pause Sync and Quit.
+- **Open at login.** A LaunchAgent on macOS or a `Run` registry value on Windows starts the app with `--hidden`.
+- **Right-click menu.** On macOS this is a Quick Action in `~/Library/Services` (Finder → Quick Actions → *Send with The Tunnel*). On Windows it's a per-user registry verb (on Windows 11 under *Show more options*). Both launch the app with `--send <paths>`. The single-instance plugin hands the paths to the running copy, which sends straight away if exactly one paired device is connected, and otherwise asks which device to use.
+- These are applied only in release builds, so `tauri dev` doesn't register itself.
+
 ## Platform notes
 
-- **Windows firewall.** The first time The Tunnel runs, Windows asks whether to allow it on the network. Allow it. A newly joined hotspot is often marked "Public", so either tick *Public networks* or switch the network to *Private*.
+- **Windows firewall.** The installer adds an inbound rule for The Tunnel on all network profiles, with one admin prompt. Phone hotspots usually count as "Public" networks, which Windows otherwise blocks. Uninstalling removes the rule.
 - **macOS Local Network.** macOS asks for permission to find devices on the local network. Allow it.
 - **Phone hotspots.** Some phones and carriers isolate devices on the hotspot from each other. If neither discovery nor *Connect by address* works, the hotspot is blocking device-to-device traffic. Try another phone, or a Wi-Fi router.

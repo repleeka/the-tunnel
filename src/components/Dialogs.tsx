@@ -110,6 +110,30 @@ export function ConnectDialog({ addresses, onClose, onConnected }: { addresses: 
   );
 }
 
+export function SendPickerDialog({ paths, devices, onClose, onPicked }: { paths: string[]; devices: Device[]; onClose: () => void; onPicked: (d: Device) => void }) {
+  const paired = devices.filter((d) => d.paired);
+  const name = paths.length === 1 ? paths[0].split(/[\\/]/).filter(Boolean).pop() : `${paths.length} items`;
+  return (
+    <Modal title={`Send ${name}`} onClose={onClose} width={420}>
+      <div className="stack">
+        {paired.length === 0 && <p className="muted">Pair with another device first, then try again.</p>}
+        {paired.length > 0 && !paired.some((d) => d.online) && (
+          <p className="muted">None of your devices are on this network right now. Connect both to the same hotspot or Wi-Fi.</p>
+        )}
+        <div className="picker">
+          {paired.map((d) => (
+            <button key={d.id} className="picker-row" disabled={!d.online} onClick={() => onPicked(d)}>
+              <DeviceIcon os={d.os} size={20} />
+              <span className="picker-name">{d.deviceName}</span>
+              <span className="muted small">{d.online ? "Connected" : "Not on this network"}</span>
+            </button>
+          ))}
+        </div>
+      </div>
+    </Modal>
+  );
+}
+
 export function SettingsDialog({ snap, onClose, onUnpair, onError }: { snap: Snapshot; onClose: () => void; onUnpair: (d: Device) => void; onError: (m: string) => void }) {
   const { settings, me } = snap;
   const [deviceName, setDeviceName] = useState(settings.deviceName);
@@ -132,6 +156,23 @@ export function SettingsDialog({ snap, onClose, onUnpair, onError }: { snap: Sna
   return (
     <Modal title="Settings" onClose={onClose} width={520}>
       <div className="settings">
+        <div className="settings-group">
+          <h4>General</h4>
+          <Toggle
+            label="Open at login"
+            hint="Starts quietly in the menu bar or system tray, so your devices always find each other."
+            checked={settings.launchAtLogin}
+            onChange={(v) => save({ launchAtLogin: v })}
+          />
+          <Toggle
+            label="“Send with The Tunnel” in the right-click menu"
+            hint={navigator.userAgent.includes("Mac") ? "In Finder, under Quick Actions." : "In File Explorer. On Windows 11 it's under “Show more options”."}
+            checked={settings.contextMenu}
+            onChange={(v) => save({ contextMenu: v })}
+          />
+          <Toggle label="Notifications" hint="For received files, pairing requests and deletions to review." checked={settings.notifications} onChange={(v) => save({ notifications: v })} />
+        </div>
+
         <div className="settings-group">
           <h4>Profile</h4>
           <label className="field">
@@ -239,5 +280,17 @@ export function SettingsDialog({ snap, onClose, onUnpair, onError }: { snap: Sna
         </div>
       </div>
     </Modal>
+  );
+}
+
+function Toggle({ label, hint, checked, onChange }: { label: string; hint: string; checked: boolean; onChange: (v: boolean) => void }) {
+  return (
+    <label className="setting-row toggle">
+      <div>
+        <div>{label}</div>
+        <div className="muted small">{hint}</div>
+      </div>
+      <input type="checkbox" className="switch" checked={checked} onChange={(e) => onChange(e.target.checked)} />
+    </label>
   );
 }

@@ -21,6 +21,7 @@ use crate::paths::{self, LocalItem};
 use crate::protocol::{Hello, Item, Msg, PROTOCOL_VERSION, RemoteEntry, read_msg, write_msg};
 use crate::store::{BrowseScope, PairedDevice, Settings, TrustStore, load_json, save_json};
 use crate::sync::{SyncState, SyncStatus};
+use crate::transfer::{Cancel, ReceivePlan, ResumeInfo};
 use crate::{discovery, pairing, tls, transfer};
 
 type Stream = TlsStream<TcpStream>;
@@ -85,6 +86,7 @@ pub enum TransferStatus {
     Done,
     Declined,
     Failed,
+    Cancelled,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -103,6 +105,8 @@ pub struct TransferInfo {
     /// Where received items were saved (the first top-level item).
     pub location: Option<String>,
     pub started_at: u64,
+    /// A failed or cancelled send/copy that can be resumed.
+    pub can_retry: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -134,6 +138,10 @@ pub struct SettingsPatch {
     pub ask_before_receiving: Option<bool>,
     pub sync_enabled: Option<bool>,
     pub browse_scope: Option<BrowseScope>,
+    pub launch_at_login: Option<bool>,
+    pub context_menu: Option<bool>,
+    pub notifications: Option<bool>,
+    pub tray_hint_shown: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -165,6 +173,12 @@ impl Nearby {
     }
 }
 
+#[derive(Clone)]
+enum RetryKind {
+    Send { device_id: String, selection: Vec<PathBuf> },
+    Pull { device_id: String, wires: Vec<String> },
+}
+
 struct Inner {
     identity: Identity,
     data_dir: PathBuf,
@@ -181,6 +195,12 @@ struct Inner {
     mdns: Mutex<Option<mdns_sd::ServiceDaemon>>,
     sync: SyncState,
     use_trash: bool,
+    cancels: Mutex<HashMap<String, Arc<Cancel>>>,
+    retries: Mutex<HashMap<String, RetryKind>>,
+    /// Partly received transfers, by the sender's transfer id, with the sending device.
+    partials: Mutex<HashMap<String, (String, ReceivePlan)>>,
+    /// Sender transfer ids currently being received, so a retry can't overlap the old attempt.
+    receiving: Mutex<std::collections::HashSet<String>>,
 }
 
 #[derive(Clone)]
@@ -206,6 +226,8 @@ impl Engine {
             },
         };
         let port = listener.local_addr()?.port();
+        // Partial files from a previous run can't be resumed (that state lived in memory).
+        let _ = std::fs::remove_dir_all(settings.receive_dir.join(transfer::PARTIAL_DIR));
 
         let engine = Engine {
             inner: Arc::new(Inner {
@@ -224,6 +246,10 @@ impl Engine {
                 mdns: Mutex::new(None),
                 sync: SyncState::default(),
                 use_trash: config.use_trash,
+                cancels: Mutex::new(HashMap::new()),
+                retries: Mutex::new(HashMap::new()),
+                partials: Mutex::new(HashMap::new()),
+                receiving: Mutex::new(std::collections::HashSet::new()),
             }),
         };
 
@@ -356,6 +382,10 @@ impl Engine {
                 s.sync_dir = v;
             }
             if let Some(v) = patch.browse_scope { s.browse_scope = v }
+            if let Some(v) = patch.launch_at_login { s.launch_at_login = v }
+            if let Some(v) = patch.context_menu { s.context_menu = v }
+            if let Some(v) = patch.notifications { s.notifications = v }
+            if let Some(v) = patch.tray_hint_shown { s.tray_hint_shown = v }
             if let Some(v) = patch.ask_before_receiving { s.ask_before_receiving = v }
             if let Some(v) = patch.sync_enabled { s.sync_enabled = v }
             s.clone()
@@ -572,7 +602,7 @@ impl Engine {
             _ if !paired => write_msg(&mut s, &Msg::error("This device isn't paired with you. Pair first.")).await,
             Msg::Offer { transfer_id, items } => self.receive_offer(s, peer_id, hello, transfer_id, items).await,
             Msg::List { path } => self.serve_listing(s, path).await,
-            Msg::Pull { paths } => self.serve_pull(s, peer_id, hello, paths).await,
+            Msg::Pull { paths, transfer_id } => self.serve_pull(s, peer_id, hello, paths, transfer_id).await,
             req @ (Msg::SyncNotify | Msg::GetIndex { .. } | Msg::GetFile { .. }) => self.serve_sync(&mut s, &peer_id, req).await,
             other => Err(other.unexpected()),
         }
@@ -691,9 +721,10 @@ impl Engine {
 
     // ---------- Transfers ----------
 
-    fn new_transfer(&self, device_id: &str, direction: Direction, items: &[Item], status: TransferStatus) -> TransferInfo {
+    /// Add a transfer to the activity list. Reusing an id (a retry) replaces the old row.
+    fn new_transfer(&self, id: Option<String>, device_id: &str, direction: Direction, items: &[Item], status: TransferStatus) -> TransferInfo {
         let t = TransferInfo {
-            id: uuid::Uuid::new_v4().to_string(),
+            id: id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
             device_id: device_id.to_string(),
             device_name: self.device_name(device_id),
             direction,
@@ -705,8 +736,10 @@ impl Engine {
             error: None,
             location: None,
             started_at: now_secs(),
+            can_retry: false,
         };
         let mut list = self.inner.transfers.lock().unwrap();
+        list.retain(|x| x.id != t.id);
         list.insert(0, t.clone());
         list.truncate(MAX_TRANSFERS_KEPT);
         drop(list);
@@ -725,15 +758,25 @@ impl Engine {
     }
 
     fn finish_transfer(&self, id: &str, result: Result<Option<PathBuf>>) {
+        let can_retry = self.inner.retries.lock().unwrap().contains_key(id);
+        if result.is_ok() {
+            self.inner.retries.lock().unwrap().remove(id);
+        }
         self.update_transfer(id, |t| match result {
             Ok(location) => {
                 t.status = TransferStatus::Done;
                 t.done_bytes = t.total_bytes;
                 t.location = location.map(|p| p.display().to_string());
+                t.can_retry = false;
+            }
+            Err(e) if transfer::is_cancelled(&e) => {
+                t.status = TransferStatus::Cancelled;
+                t.can_retry = can_retry;
             }
             Err(e) => {
                 t.status = TransferStatus::Failed;
                 t.error = Some(format!("{e:#}"));
+                t.can_retry = can_retry;
             }
         });
     }
@@ -750,23 +793,69 @@ impl Engine {
         }
     }
 
+    fn register_cancel(&self, id: &str) -> Arc<Cancel> {
+        let cancel = Arc::new(Cancel::default());
+        self.inner.cancels.lock().unwrap().insert(id.to_string(), cancel.clone());
+        cancel
+    }
+
+    fn drop_cancel(&self, id: &str) {
+        self.inner.cancels.lock().unwrap().remove(id);
+    }
+
+    /// Stop a transfer that is waiting or in progress.
+    pub fn cancel_transfer(&self, id: &str) {
+        self.respond_offer(id, false);
+        if let Some(c) = self.inner.cancels.lock().unwrap().get(id) {
+            c.cancel();
+        }
+    }
+
+    /// Start a failed or cancelled transfer again, resuming where it stopped.
+    pub async fn retry_transfer(&self, id: &str) -> Result<()> {
+        let kind = self.inner.retries.lock().unwrap().get(id).cloned().context("This transfer can't be retried.")?;
+        match kind {
+            RetryKind::Send { device_id, selection } => {
+                let locals = tokio::task::spawn_blocking(move || paths::collect(&selection, &Default::default())).await??;
+                if locals.is_empty() {
+                    bail!("The files no longer exist.");
+                }
+                let items: Vec<Item> = locals.iter().map(|l| l.item.clone()).collect();
+                self.new_transfer(Some(id.to_string()), &device_id, Direction::Send, &items, TransferStatus::Waiting);
+                self.spawn_send(device_id, id.to_string(), items, locals);
+            }
+            RetryKind::Pull { device_id, wires } => {
+                self.start_pull(&device_id, wires, Some(id.to_string())).await?;
+            }
+        }
+        Ok(())
+    }
+
     /// Send files and folders to a paired device. Returns the transfer id.
     pub async fn send_paths(&self, device_id: &str, selection: Vec<PathBuf>) -> Result<String> {
         if !self.is_paired(device_id) {
             bail!("Pair with this device before sending files.");
         }
+        let chosen = selection.clone();
         let locals = tokio::task::spawn_blocking(move || paths::collect(&selection, &Default::default())).await??;
         if locals.is_empty() {
             bail!("Nothing to send.");
         }
         let items: Vec<Item> = locals.iter().map(|l| l.item.clone()).collect();
-        let t = self.new_transfer(device_id, Direction::Send, &items, TransferStatus::Waiting);
-        let (engine, device_id, id) = (self.clone(), device_id.to_string(), t.id.clone());
+        let t = self.new_transfer(None, device_id, Direction::Send, &items, TransferStatus::Waiting);
+        self.inner.retries.lock().unwrap().insert(t.id.clone(), RetryKind::Send { device_id: device_id.to_string(), selection: chosen });
+        self.spawn_send(device_id.to_string(), t.id.clone(), items, locals);
+        Ok(t.id)
+    }
+
+    fn spawn_send(&self, device_id: String, id: String, items: Vec<Item>, locals: Vec<LocalItem>) {
+        let engine = self.clone();
+        let cancel = self.register_cancel(&id);
         tokio::spawn(async move {
-            let result = engine.run_send(&device_id, &id, items, locals).await;
+            let result = engine.run_send(&device_id, &id, items, locals, &cancel).await;
+            engine.drop_cancel(&id);
             engine.finish_send(&id, result);
         });
-        Ok(t.id)
     }
 
     fn finish_send(&self, id: &str, result: Result<bool>) {
@@ -777,24 +866,62 @@ impl Engine {
         }
     }
 
-    async fn run_send(&self, device_id: &str, id: &str, items: Vec<Item>, locals: Vec<LocalItem>) -> Result<bool> {
-        let (mut s, _) = self.connect(device_id).await?;
+    async fn run_send(&self, device_id: &str, id: &str, items: Vec<Item>, locals: Vec<LocalItem>, cancel: &Cancel) -> Result<bool> {
+        let (mut s, _) = tokio::select! {
+            r = self.connect(device_id) => r?,
+            _ = cancel.cancelled() => bail!(transfer::Cancelled),
+        };
         write_msg(&mut s, &Msg::Offer { transfer_id: id.to_string(), items }).await?;
-        match timeout(OFFER_TIMEOUT, read_msg(&mut s)).await.context("no answer from the other device")?? {
-            Msg::OfferReply { accept: true } => {}
-            Msg::OfferReply { accept: false } => return Ok(false),
-            other => return Err(other.unexpected()),
-        }
-        self.update_transfer(id, |t| t.status = TransferStatus::Active);
-        transfer::send_files(&mut s, &locals, self.progress(id)).await?;
+        let reply = tokio::select! {
+            r = timeout(OFFER_TIMEOUT, read_msg(&mut s)) => r.context("no answer from the other device")??,
+            _ = cancel.cancelled() => bail!(transfer::Cancelled),
+        };
+        let Some(resume) = resume_from_reply(reply)? else { return Ok(false) };
+        let already = resume.already_have(&locals);
+        self.update_transfer(id, |t| {
+            t.status = TransferStatus::Active;
+            t.done_bytes = already;
+        });
+        transfer::send_files(&mut s, &locals, &resume, cancel, self.progress(id)).await?;
         Ok(true)
     }
 
-    async fn receive_offer(&self, mut s: Stream, peer_id: String, hello: Hello, _remote_id: String, items: Vec<Item>) -> Result<()> {
+    /// Reuse what an earlier attempt of the same transfer already received, if anything.
+    fn receive_plan(&self, peer_id: &str, transfer_id: &str, items: &[Item]) -> Result<ReceivePlan> {
+        if self.inner.receiving.lock().unwrap().contains(transfer_id) {
+            bail!("The previous attempt is still finishing. Try again in a moment.");
+        }
+        if let Some((peer, plan)) = self.inner.partials.lock().unwrap().remove(transfer_id) {
+            if peer == peer_id && plan.items == items {
+                return Ok(plan);
+            }
+            plan.discard();
+        }
+        ReceivePlan::new(&self.settings().receive_dir, items.to_vec(), transfer_id)
+    }
+
+    /// Receive into `plan`, keeping partial files for a retry unless the user cancelled.
+    async fn receive_into(&self, s: &mut Stream, peer_id: &str, transfer_id: &str, local_id: &str, mut plan: ReceivePlan) {
+        let cancel = self.register_cancel(local_id);
+        self.inner.receiving.lock().unwrap().insert(transfer_id.to_string());
+        let result = transfer::receive_files(s, &mut plan, &cancel, self.progress(local_id)).await;
+        self.drop_cancel(local_id);
+        match &result {
+            Err(e) if !transfer::is_cancelled(e) => {
+                self.inner.partials.lock().unwrap().insert(transfer_id.to_string(), (peer_id.to_string(), plan));
+            }
+            Err(_) => plan.discard(),
+            Ok(_) => {}
+        }
+        self.inner.receiving.lock().unwrap().remove(transfer_id);
+        self.finish_transfer(local_id, result.map(|tops| tops.into_iter().next()));
+    }
+
+    async fn receive_offer(&self, mut s: Stream, peer_id: String, hello: Hello, remote_id: String, items: Vec<Item>) -> Result<()> {
         if items.is_empty() || items.len() > MAX_ITEMS {
             return write_msg(&mut s, &Msg::error("invalid transfer")).await;
         }
-        let t = self.new_transfer(&peer_id, Direction::Receive, &items, TransferStatus::Waiting);
+        let t = self.new_transfer(None, &peer_id, Direction::Receive, &items, TransferStatus::Waiting);
         let accept = if self.settings().ask_before_receiving {
             let (tx, rx) = oneshot::channel();
             self.inner.offers.lock().unwrap().insert(t.id.clone(), tx);
@@ -811,15 +938,26 @@ impl Engine {
         } else {
             true
         };
-        write_msg(&mut s, &Msg::OfferReply { accept }).await?;
         if !accept {
+            write_msg(&mut s, &Msg::OfferReply { accept: false, skip: vec![], resume: vec![] }).await?;
             self.update_transfer(&t.id, |t| t.status = TransferStatus::Declined);
             return Ok(());
         }
-        self.update_transfer(&t.id, |t| t.status = TransferStatus::Active);
-        let dest = self.settings().receive_dir;
-        let result = transfer::receive_files(&mut s, &items, &dest, self.progress(&t.id)).await;
-        self.finish_transfer(&t.id, result.map(|tops| tops.into_iter().next()));
+        let plan = match self.receive_plan(&peer_id, &remote_id, &items) {
+            Ok(p) => p,
+            Err(e) => {
+                write_msg(&mut s, &Msg::error(format!("{e:#}"))).await?;
+                self.finish_transfer(&t.id, Err(e));
+                return Ok(());
+            }
+        };
+        let (reply, already) = reply_for(&plan);
+        write_msg(&mut s, &reply).await?;
+        self.update_transfer(&t.id, |t| {
+            t.status = TransferStatus::Active;
+            t.done_bytes = already;
+        });
+        self.receive_into(&mut s, &peer_id, &remote_id, &t.id, plan).await;
         Ok(())
     }
 
@@ -900,7 +1038,7 @@ impl Engine {
         }
     }
 
-    async fn serve_pull(&self, mut s: Stream, peer_id: String, _hello: Hello, wires: Vec<String>) -> Result<()> {
+    async fn serve_pull(&self, mut s: Stream, peer_id: String, _hello: Hello, wires: Vec<String>, requested_id: Option<String>) -> Result<()> {
         let whole_place = self.settings().browse_scope == BrowseScope::Computer && wires.iter().any(|w| !w.trim_matches('/').contains('/'));
         let selection: Result<Vec<PathBuf>> = if whole_place {
             Err(anyhow!("Copying a whole drive or home folder isn't supported. Open it and choose the folders you need."))
@@ -918,55 +1056,87 @@ impl Engine {
             Err(e) => return write_msg(&mut s, &Msg::error(format!("{e:#}"))).await,
         };
         let items: Vec<Item> = locals.iter().map(|l| l.item.clone()).collect();
-        let t = self.new_transfer(&peer_id, Direction::Send, &items, TransferStatus::Waiting);
+        let id = requested_id.filter(|id| id.len() <= 64 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'));
+        let t = self.new_transfer(id, &peer_id, Direction::Send, &items, TransferStatus::Waiting);
         write_msg(&mut s, &Msg::Offer { transfer_id: t.id.clone(), items }).await?;
+        let cancel = self.register_cancel(&t.id);
         let result = async {
-            match timeout(HANDSHAKE_TIMEOUT, read_msg(&mut s)).await.context("timed out")?? {
-                Msg::OfferReply { accept: true } => {}
-                Msg::OfferReply { accept: false } => return Ok(false),
-                other => return Err(other.unexpected()),
-            }
-            self.update_transfer(&t.id, |t| t.status = TransferStatus::Active);
-            transfer::send_files(&mut s, &locals, self.progress(&t.id)).await?;
+            let reply = timeout(HANDSHAKE_TIMEOUT, read_msg(&mut s)).await.context("timed out")??;
+            let Some(resume) = resume_from_reply(reply)? else { return Ok(false) };
+            let already = resume.already_have(&locals);
+            self.update_transfer(&t.id, |t| {
+                t.status = TransferStatus::Active;
+                t.done_bytes = already;
+            });
+            transfer::send_files(&mut s, &locals, &resume, &cancel, self.progress(&t.id)).await?;
             Ok(true)
         }
         .await;
+        self.drop_cancel(&t.id);
         self.finish_send(&t.id, result);
         Ok(())
     }
 
-    /// Copy items from a paired device's shared folder to this device.
+    /// Copy items from a paired device to this device's receive folder.
     pub async fn pull(&self, device_id: &str, wires: Vec<String>) -> Result<String> {
+        self.start_pull(device_id, wires, None).await
+    }
+
+    async fn start_pull(&self, device_id: &str, wires: Vec<String>, retry_id: Option<String>) -> Result<String> {
         if !self.is_paired(device_id) {
             bail!("Pair with this device first.");
         }
+        let id = retry_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         let (mut s, _) = self.connect(device_id).await?;
-        write_msg(&mut s, &Msg::Pull { paths: wires }).await?;
+        write_msg(&mut s, &Msg::Pull { paths: wires.clone(), transfer_id: Some(id.clone()) }).await?;
         let items = match timeout(OFFER_TIMEOUT, read_msg(&mut s)).await.context("timed out")?? {
             Msg::Offer { items, .. } if !items.is_empty() && items.len() <= MAX_ITEMS => items,
             other => return Err(other.unexpected()),
         };
-        let t = self.new_transfer(device_id, Direction::Receive, &items, TransferStatus::Active);
-        write_msg(&mut s, &Msg::OfferReply { accept: true }).await?;
-        let (engine, id) = (self.clone(), t.id.clone());
+        self.new_transfer(Some(id.clone()), device_id, Direction::Receive, &items, TransferStatus::Active);
+        self.inner.retries.lock().unwrap().insert(id.clone(), RetryKind::Pull { device_id: device_id.to_string(), wires });
+        let plan = self.receive_plan(device_id, &id, &items)?;
+        let (reply, already) = reply_for(&plan);
+        write_msg(&mut s, &reply).await?;
+        self.update_transfer(&id, |t| t.done_bytes = already);
+        let (engine, device_id, transfer_id) = (self.clone(), device_id.to_string(), id.clone());
         tokio::spawn(async move {
-            let dest = engine.settings().receive_dir;
-            let result = transfer::receive_files(&mut s, &items, &dest, engine.progress(&id)).await;
-            engine.finish_transfer(&id, result.map(|tops| tops.into_iter().next()));
+            engine.receive_into(&mut s, &device_id, &transfer_id, &transfer_id, plan).await;
         });
-        Ok(t.id)
+        Ok(id)
     }
 
     pub fn clear_finished_transfers(&self) {
-        self.inner
-            .transfers
-            .lock()
-            .unwrap()
-            .retain(|t| matches!(t.status, TransferStatus::Waiting | TransferStatus::Active));
+        let mut list = self.inner.transfers.lock().unwrap();
+        list.retain(|t| matches!(t.status, TransferStatus::Waiting | TransferStatus::Active));
+        let kept: std::collections::HashSet<_> = list.iter().map(|t| t.id.clone()).collect();
+        self.inner.retries.lock().unwrap().retain(|id, _| kept.contains(id));
     }
 }
 
 // ---------- Helpers ----------
+
+/// Interpret the receiver's answer to an offer: `None` if declined.
+fn resume_from_reply(reply: Msg) -> Result<Option<ResumeInfo>> {
+    match reply {
+        Msg::OfferReply { accept: false, .. } => Ok(None),
+        Msg::OfferReply { accept: true, skip, resume } => Ok(Some(ResumeInfo {
+            skip: skip.into_iter().map(|i| i as usize).collect(),
+            offsets: resume.into_iter().map(|(i, o)| (i as usize, o)).collect(),
+        })),
+        other => Err(other.unexpected()),
+    }
+}
+
+/// The accepting reply for a receive plan, and how many bytes are already here.
+fn reply_for(plan: &ReceivePlan) -> (Msg, u64) {
+    let info = plan.resume_info();
+    let already = info.skip.iter().map(|i| plan.items[*i].size).sum::<u64>() + info.offsets.values().sum::<u64>();
+    let mut skip: Vec<u32> = info.skip.iter().map(|i| *i as u32).collect();
+    skip.sort();
+    let resume = info.offsets.iter().map(|(i, o)| (*i as u32, *o)).collect();
+    (Msg::OfferReply { accept: true, skip, resume }, already)
+}
 
 fn check_protocol(hello: &Hello) -> Result<()> {
     if hello.protocol != PROTOCOL_VERSION {

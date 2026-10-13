@@ -1844,3 +1844,38 @@ button {
 :root[data-platform="windows"][data-effects="on"] body {
   background: transparent;
 }
+
+/* ---------- Send picker ---------- */
+
+.picker {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.picker-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--btn-bg);
+  text-align: left;
+  cursor: pointer;
+}
+.picker-row:hover:not(:disabled) {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+.picker-row:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.picker-name {
+  flex: 1;
+  font-weight: 550;
+}
+.transfer .btn + .btn {
+  margin-left: 6px;
+}

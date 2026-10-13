@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { listen } from "@tauri-apps/api/event";
 import { api, Device, onTunnelEvent, Snapshot, Transfer } from "./api";
 import { Activity } from "./components/Activity";
 import { DevicePanel, Searching, Tab } from "./components/DevicePanel";
-import { ConnectDialog, Offer, OfferDialog, PairingDialog, PairingState, SettingsDialog } from "./components/Dialogs";
+import { ConnectDialog, Offer, OfferDialog, PairingDialog, PairingState, SendPickerDialog, SettingsDialog } from "./components/Dialogs";
 import { Onboarding } from "./components/Onboarding";
 import { Sidebar } from "./components/Sidebar";
 import { Toast, Toasts } from "./components/ui";
@@ -18,6 +19,7 @@ export default function App() {
   const [dragging, setDragging] = useState(false);
   const [dismissed, setDismissed] = useState<Set<string>>(new Set());
   const [tab, setTab] = useState<Tab>("sync");
+  const [sendRequest, setSendRequest] = useState<string[] | null>(null);
 
   const snapRef = useRef(snap);
   snapRef.current = snap;
@@ -73,6 +75,17 @@ export default function App() {
       unlisten.then((f) => f());
     };
   }, [refresh, toast]);
+
+  // "Send with The Tunnel" from the right-click menu, when there's a choice of device.
+  useEffect(() => {
+    api.takeSendRequest().then((paths) => paths.length && setSendRequest(paths));
+    const unlisten = listen<string[]>("send-request", () => {
+      api.takeSendRequest().then((paths) => paths.length && setSendRequest((old) => [...(old ?? []), ...paths]));
+    });
+    return () => {
+      unlisten.then((f) => f());
+    };
+  }, []);
 
   // Drag files from Finder / File Explorer onto the window.
   useEffect(() => {
@@ -237,6 +250,7 @@ export default function App() {
               await api.clearTransfers();
               refresh();
             }}
+            onError={showError}
           />
         </div>
       </main>
@@ -256,6 +270,18 @@ export default function App() {
         />
       )}
       {dialog === "settings" && <SettingsDialog snap={snap} onClose={() => setDialog(null)} onUnpair={unpair} onError={showError} />}
+      {sendRequest && (
+        <SendPickerDialog
+          paths={sendRequest}
+          devices={devices}
+          onClose={() => setSendRequest(null)}
+          onPicked={(d) => {
+            setSendRequest(null);
+            setSelectedId(d.id);
+            send(d, sendRequest);
+          }}
+        />
+      )}
       <Toasts toasts={toasts} dismiss={dismissToast} />
     </div>
   );

@@ -21,7 +21,7 @@ pub struct Hello {
 }
 
 /// One file or folder in a transfer. `path` is relative and `/`-separated.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Item {
     pub path: String,
@@ -56,8 +56,21 @@ pub enum Msg {
     PairReveal { nonce: String },
     PairDecision { accept: bool },
     Offer { transfer_id: String, items: Vec<Item> },
-    OfferReply { accept: bool },
-    FileStart { index: u32 },
+    /// `skip` lists files the receiver already has from an earlier attempt of the
+    /// same transfer; `resume` lists partly received files and their sizes.
+    OfferReply {
+        accept: bool,
+        #[serde(default)]
+        skip: Vec<u32>,
+        #[serde(default)]
+        resume: Vec<(u32, u64)>,
+    },
+    /// Followed by the file's bytes from `offset` to the end.
+    FileStart {
+        index: u32,
+        #[serde(default)]
+        offset: u64,
+    },
     FileEnd { sha256: String },
     TransferDone { ok: bool, message: Option<String> },
     List { path: String },
@@ -68,7 +81,12 @@ pub enum Msg {
         #[serde(default)]
         root: String,
     },
-    Pull { paths: Vec<String> },
+    Pull {
+        paths: Vec<String>,
+        /// Chosen by the requester so a retry can resume the same transfer.
+        #[serde(default)]
+        transfer_id: Option<String>,
+    },
     // Folder sync
     SyncNotify,
     GetIndex { index_id: Option<String>, seq: u64 },

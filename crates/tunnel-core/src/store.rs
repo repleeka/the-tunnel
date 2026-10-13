@@ -38,6 +38,13 @@ pub struct Settings {
     pub ask_before_receiving: bool,
     pub sync_enabled: bool,
     pub browse_scope: BrowseScope,
+    /// Start (hidden, in the tray) when the user logs in.
+    pub launch_at_login: bool,
+    /// Offer "Send with The Tunnel" in Finder / File Explorer.
+    pub context_menu: bool,
+    pub notifications: bool,
+    /// The "still running in the tray" hint has been shown once.
+    pub tray_hint_shown: bool,
     #[serde(default)]
     pub settings_version: u32,
 }
@@ -54,7 +61,11 @@ impl Default for Settings {
             sync_dir: downloads.join("The Tunnel"),
             ask_before_receiving: false,
             sync_enabled: true,
-            browse_scope: BrowseScope::Home,
+            browse_scope: BrowseScope::Computer,
+            launch_at_login: true,
+            context_menu: true,
+            notifications: true,
+            tray_hint_shown: false,
             settings_version: SETTINGS_VERSION,
         }
     }
@@ -144,5 +155,6 @@ mod tests {
         custom.migrate();
         assert_eq!(custom.sync_dir, PathBuf::from("/Volumes/Work/Sync"));
         assert_eq!(Settings::default().settings_version, SETTINGS_VERSION);
+        assert_eq!(Settings::default().browse_scope, BrowseScope::Computer);
     }
 }

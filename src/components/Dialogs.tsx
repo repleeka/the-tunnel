@@ -1,4 +1,6 @@
-import { FormEvent, useState } from "react";
+import { FormEvent, useEffect, useState } from "react";
+import { getVersion } from "@tauri-apps/api/app";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { open } from "@tauri-apps/plugin-dialog";
 import { api, BrowseScope, Device, formatBytes, Snapshot } from "../api";
 import { DeviceIcon, Icon } from "./Icon";
@@ -272,6 +274,11 @@ export function SettingsDialog({ snap, onClose, onUnpair, onError }: { snap: Sna
           ))}
         </div>
 
+        <div className="settings-group">
+          <h4>About</h4>
+          <About />
+        </div>
+
         <div className="settings-foot muted small">
           <Icon name="shield" size={14} />
           <span>
@@ -292,5 +299,32 @@ function Toggle({ label, hint, checked, onChange }: { label: string; hint: strin
       </div>
       <input type="checkbox" className="switch" checked={checked} onChange={(e) => onChange(e.target.checked)} />
     </label>
+  );
+}
+
+export const DEVELOPER = "Tungon Dugi";
+export const DEVELOPER_EMAIL = "tungondugi@gmail.com";
+
+function About() {
+  const [version, setVersion] = useState("");
+  useEffect(() => {
+    getVersion()
+      .then(setVersion)
+      .catch(() => {});
+  }, []);
+  return (
+    <div className="about">
+      <img src="/logo.png" alt="" className="about-logo" />
+      <div>
+        <div className="about-name">The Tunnel{version && <span className="muted"> · version {version}</span>}</div>
+        <div>
+          Developed by <strong>{DEVELOPER}</strong>
+        </div>
+        <button className="link-btn small" onClick={() => openUrl(`mailto:${DEVELOPER_EMAIL}`)}>
+          {DEVELOPER_EMAIL}
+        </button>
+        <div className="muted small">© {new Date().getFullYear()} {DEVELOPER}. All rights reserved.</div>
+      </div>
+    </div>
   );
 }

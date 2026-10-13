@@ -1879,3 +1879,19 @@ button {
 .transfer .btn + .btn {
   margin-left: 6px;
 }
+
+/* ---------- About ---------- */
+
+.about {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+.about-logo {
+  width: 48px;
+  height: 48px;
+  flex-shrink: 0;
+}
+.about-name {
+  font-weight: 600;
+}

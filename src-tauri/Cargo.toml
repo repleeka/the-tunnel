@@ -2,7 +2,7 @@
 name = "the-tunnel"
 version = "0.5.1"
 description = "Move files between your devices over the local network"
-authors = ["The Tunnel"]
+authors = ["Tungon Dugi <tungondugi@gmail.com>"]
 edition = "2024"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html

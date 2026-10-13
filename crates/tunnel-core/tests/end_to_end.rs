@@ -65,7 +65,10 @@ async fn pair_send_and_pull() {
     std::fs::create_dir_all(folder.join("trip")).unwrap();
     let big: Vec<u8> = (0..3_000_000u32).map(|i| (i % 251) as u8).collect();
     std::fs::write(folder.join("trip").join("big.bin"), &big).unwrap();
-    std::fs::write(folder.join("notes: draft?.txt"), "draft").unwrap();
+    // A Mac file name Windows can't store; it can only be created on macOS/Linux.
+    if cfg!(not(windows)) {
+        std::fs::write(folder.join("notes: draft?.txt"), "draft").unwrap();
+    }
     std::fs::write(folder.join(".DS_Store"), "junk").unwrap();
     let id = mac.send_paths(pc.device_id(), vec![file.clone(), folder.clone()]).await.unwrap();
     let done = wait_transfer(&mut mac_rx, &id).await;
@@ -74,7 +77,9 @@ async fn pair_send_and_pull() {
     let recv = root.path().join("PC").join("received");
     assert_eq!(std::fs::read_to_string(recv.join("hello.txt")).unwrap(), "hello from the mac");
     assert_eq!(std::fs::read(recv.join("Photos/trip/big.bin")).unwrap(), big);
-    assert_eq!(std::fs::read_to_string(recv.join("Photos/notes_ draft_.txt")).unwrap(), "draft");
+    if cfg!(not(windows)) {
+        assert_eq!(std::fs::read_to_string(recv.join("Photos/notes_ draft_.txt")).unwrap(), "draft");
+    }
     assert!(!recv.join("Photos/.DS_Store").exists());
 
     // Sending the same file again doesn't overwrite the first copy.

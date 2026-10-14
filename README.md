@@ -86,10 +86,11 @@ Download the installer for your system from the **[Releases](../../releases)** p
 2. Open The Tunnel from Applications. Because it isn't signed, macOS blocks it the first time:
    - **macOS 15 Sequoia and later:** open **System Settings → Privacy & Security**, scroll down to the message about The Tunnel, and click **Open Anyway**.
    - **macOS 14 and earlier:** right-click (or Control-click) The Tunnel in Applications and choose **Open**, then **Open** again.
-   - If macOS says the app **"is damaged and can't be opened"**, that's the download quarantine flag, not real damage. Run this in Terminal, then open it again:
+   - If macOS says **"The Tunnel" is damaged and can't be opened**, the file isn't actually broken. macOS shows this for unsigned apps downloaded from the internet, especially on Apple Silicon Macs. Click **Cancel** (not *Move to Trash*), make sure the app is in Applications, then open **Terminal** and run:
      ```sh
      xattr -dr com.apple.quarantine "/Applications/The Tunnel.app"
      ```
+     This removes the "downloaded from the internet" flag. Open The Tunnel again and it starts normally.
 3. When asked, **allow** The Tunnel to:
    - **find devices on your local network** (required),
    - **send notifications** (recommended),
@@ -257,6 +258,8 @@ To publish a release:
 3. Wait for the **Release** workflow to finish (the **Actions** tab), about 15–20 minutes.
 4. Open **Releases**, check the draft, and click **Publish release**. Anyone can now download the installers from the Releases page.
 
+> The macOS app is ad-hoc signed (`"signingIdentity": "-"` in `src-tauri/tauri.conf.json`). It isn't a real Developer ID signature, but without it macOS on Apple Silicon reports the downloaded app as "damaged" instead of offering **Open Anyway**. Keep that setting until proper signing and notarization are set up.
+
 > If the workflow fails with a permissions error, open **Settings → Actions → General → Workflow permissions** in the repository and choose **Read and write permissions**.
 
 ---
@@ -270,6 +273,8 @@ To publish a release:
 3. **macOS:** check **System Settings → Privacy & Security → Local Network** and make sure The Tunnel is on.
 4. Use **Connect by address** with the address shown at the bottom of the other device's **Settings**. If the other device is using a different port, type it as `address:port`, for example `172.20.10.3:47800`.
 5. If even that fails, the network is blocking devices from talking to each other. Some phones and carriers isolate devices on a hotspot ("client isolation" or "AP isolation"). Try another phone's hotspot or a Wi-Fi router.
+
+**macOS says The Tunnel "is damaged and can't be opened".** The download is fine; this is how macOS treats an unsigned app downloaded from the internet. Run `xattr -dr com.apple.quarantine "/Applications/The Tunnel.app"` in Terminal and open it again. See [macOS](#macos) for details.
 
 **macOS keeps asking for folder access after an update.** That's expected until the app is code-signed: macOS treats every new unsigned build as a new app.
 
